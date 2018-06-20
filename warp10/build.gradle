@@ -72,13 +72,19 @@ dependencies {
     //
     compile 'commons-cli:commons-cli:1.3.1'
 
+    // ZK
+    compile ('org.apache.zookeeper:zookeeper:3.4.5-mapr-1710'){
+        force = true
+    }
+
     //
     // HBase 1.0.0
     //
-    compile 'org.apache.hbase:hbase-client:1.0.0'
-    compile 'org.apache.hbase:hbase-examples:1.0.0'
-    compile 'org.apache.hbase:hbase-common:1.0.0'
-    compile 'org.apache.hbase:hbase-protocol:1.0.0'
+    compile 'com.mapr.fs:mapr-hbase:6.0.1-mapr'
+    compile 'org.apache.hbase:hbase-client:1.1.8-mapr-1710'
+    compile 'org.apache.hbase:hbase-examples:1.1.8-mapr-1710'
+    compile 'org.apache.hbase:hbase-common:1.1.8-mapr-1710'
+    compile 'org.apache.hbase:hbase-protocol:1.1.8-mapr-1710'
 
     // Consider using -indy version of groovy-all
     compile 'org.codehaus.groovy:groovy-all:2.1.6'

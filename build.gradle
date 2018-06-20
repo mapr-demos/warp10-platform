@@ -142,6 +142,10 @@ subprojects {
             url 'https://dl.bintray.com/cityzendata/maven'
         }
 
+        maven {
+            url "http://repository.mapr.com/maven/"
+        }
+
         //maven {
         //  url "https://repository.apache.org/content/repositories/orgapachehbase-1065"
         //}
