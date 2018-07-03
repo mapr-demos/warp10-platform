@@ -59,10 +59,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.zip.GZIPOutputStream;
 
-import kafka.javaapi.producer.Producer;
 import kafka.producer.KeyedMessage;
 import kafka.producer.ProducerConfig;
 
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TCompactProtocol;
@@ -609,8 +610,8 @@ public class ScriptRunner extends Thread {
       content = CryptoUtils.addMAC(this.KAFKA_MAC, content);
     }
     
-    Producer<byte[],byte[]> producer = null;
-    
+    KafkaProducer<byte[],byte[]> producer = null;
+
     // Use the script path as the scheduling key so the same script ends up in the same partition
     byte[] key = path.getBytes(Charsets.UTF_8);
     KeyedMessage<byte[],byte[]> message = new KeyedMessage<byte[], byte[]>(this.topic, key, content);
@@ -618,7 +619,7 @@ public class ScriptRunner extends Thread {
     try {
       producer = this.kafkaProducerPool.getProducer();
       
-      producer.send(message);
+      producer.send(new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message()));
     } catch (Exception e) {
       // Reschedule immediately
       nextrun.put(script, System.currentTimeMillis());

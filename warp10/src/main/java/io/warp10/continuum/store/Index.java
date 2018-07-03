@@ -34,6 +34,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,13 +49,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.message.MessageAndMetadata;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.HTableInterface;
 import org.apache.hadoop.hbase.client.HTablePool;
@@ -63,6 +57,9 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.DirectoryRowFilter;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TCompactProtocol;
@@ -925,87 +922,85 @@ public class Index {
           Properties props = new Properties();
           props.setProperty("zookeeper.connect", index.properties.getProperty(INDEX_KAFKA_METADATA_ZKCONNECT));
           props.setProperty("group.id", index.properties.getProperty(INDEX_KAFKA_METADATA_GROUPID));
-          props.setProperty("auto.commit.enable", "false");    
-          
-          ConsumerConfig config = new ConsumerConfig(props);
-          ConsumerConnector connector = Consumer.createJavaConsumerConnector(config);
-          
-          Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-          
-          List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(index.properties.getProperty(INDEX_KAFKA_METADATA_TOPIC));
+          props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+          props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+          props.setProperty("auto.commit.enable", "false");
 
+          KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
           long lastCommit = System.currentTimeMillis();
           long commitPeriod = Long.valueOf(index.properties.getProperty(INDEX_KAFKA_METADATA_COMMITPERIOD));
           
           try {
-            ConsumerIterator<byte[],byte[]> iter = streams.get(0).iterator();
+            while(true) {
 
-            while(iter.hasNext()) {
-              MessageAndMetadata<byte[], byte[]> msg = iter.next();
-              
-              byte[] data = msg.message();
-              
-              if (null != index.keystore.getKey(KeyStore.SIPHASH_KAFKA_METADATA)) {
-                data = CryptoUtils.removeMAC(index.keystore.getKey(KeyStore.SIPHASH_KAFKA_METADATA), data);
-              }
-              
-              // Skip data whose MAC was not verified successfully
-              if (null == data) {
-                // TODO(hbs): increment Sensision metric
-                continue;
-              }
-              
-              // Unwrap data if need be
-              if (null != index.keystore.getKey(KeyStore.AES_KAFKA_METADATA)) {
-                data = CryptoUtils.unwrap(index.keystore.getKey(KeyStore.AES_KAFKA_METADATA), data);
-              }
-              
-              // Skip data that was not unwrapped successfuly
-              if (null == data) {
-                // TODO(hbs): increment Sensision metric
-                continue;
-              }
-              
-              //
-              // Only retain data with matching key
-              //
-              
-              byte r = (byte) (msg.key()[8] % index.modulus);
-              
-              if (index.remainder != r) {
-                continue;
-              }
-              
-              //
-              // TODO(hbs): We could check that metadata class/labels Id match those of the key, but
-              // since it was wrapped/authenticated, we suppose it's ok.
-              //
-                          
-              byte[] metadataBytes = Arrays.copyOfRange(data, 16, data.length);
-              TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
-              Metadata metadata = new Metadata();
-              deserializer.deserialize(metadata, metadataBytes);
-              
-              //
-              // Register indices for 'metadata'
-              //
-              
-              registerGTSIndices(metadata);
-              
-              //
-              // Commit offsets if that time has come
-              //
-              
-              if (System.currentTimeMillis() - lastCommit > commitPeriod) {
-                connector.commitOffsets();
-                lastCommit = System.currentTimeMillis();
+              ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+
+              for(ConsumerRecord<byte[], byte[]> record : records) {
+                byte[] data = record.value();
+
+                if (null != index.keystore.getKey(KeyStore.SIPHASH_KAFKA_METADATA)) {
+                  data = CryptoUtils.removeMAC(index.keystore.getKey(KeyStore.SIPHASH_KAFKA_METADATA), data);
+                }
+
+                // Skip data whose MAC was not verified successfully
+                if (null == data) {
+                  // TODO(hbs): increment Sensision metric
+                  continue;
+                }
+
+                // Unwrap data if need be
+                if (null != index.keystore.getKey(KeyStore.AES_KAFKA_METADATA)) {
+                  data = CryptoUtils.unwrap(index.keystore.getKey(KeyStore.AES_KAFKA_METADATA), data);
+                }
+
+                // Skip data that was not unwrapped successfuly
+                if (null == data) {
+                  // TODO(hbs): increment Sensision metric
+                  continue;
+                }
+
+                //
+                // Only retain data with matching key
+                //
+
+                byte r = (byte) (record.key()[8] % index.modulus);
+
+                if (index.remainder != r) {
+                  continue;
+                }
+
+                //
+                // TODO(hbs): We could check that metadata class/labels Id match those of the key, but
+                // since it was wrapped/authenticated, we suppose it's ok.
+                //
+
+                byte[] metadataBytes = Arrays.copyOfRange(data, 16, data.length);
+                TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
+                Metadata metadata = new Metadata();
+                deserializer.deserialize(metadata, metadataBytes);
+
+                //
+                // Register indices for 'metadata'
+                //
+
+                registerGTSIndices(metadata);
+
+                //
+                // Commit offsets if that time has come
+                //
+
+                if (System.currentTimeMillis() - lastCommit > commitPeriod) {
+                  consumer.commitAsync(); // FIXME FIXME FIXME
+                  lastCommit = System.currentTimeMillis();
+                }
+
               }
             }
           } catch (Exception e) {
             
           } finally {
-            if (null != connector) {
-              connector.shutdown();
+            if (null != consumer) {
+              consumer.close();
             }
           }          
         } catch (Exception e) {
@@ -1222,23 +1217,14 @@ public class Index {
         
         while (true) {
           try {
-            Map<String,Integer> topicCountMap = new HashMap<String, Integer>();
-            
-            topicCountMap.put(topic, nthreads);
-            
             Properties props = new Properties();
             props.setProperty("zookeeper.connect", index.properties.getProperty(INDEX_KAFKA_DATA_ZKCONNECT));
             props.setProperty("group.id", index.properties.getProperty(INDEX_KAFKA_DATA_GROUPID));
+            props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+            props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
             props.setProperty("auto.commit.enable", "false");    
             
-            ConsumerConfig config = new ConsumerConfig(props);
-            ConsumerConnector connector = Consumer.createJavaConsumerConnector(config);
-            
-            Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-            
-            List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-
-            index.barrier = new CyclicBarrier(streams.size() + 1);
+            index.barrier = new CyclicBarrier(nthreads + 1);
 
             ExecutorService executor = Executors.newFixedThreadPool(nthreads);
             
@@ -1246,12 +1232,14 @@ public class Index {
             // now create runnables which will consume messages
             //
             
-            for (final KafkaStream<byte[],byte[]> stream : streams) {
-              executor.submit(new IndexDataConsumer(this.index, stream));
+            for (int i = 0; i < nthreads; i++) {
+              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+              consumer.subscribe(Collections.singletonList(topic));
+              executor.submit(new IndexDataConsumer(this.index, consumer));
             }      
-            
+
             while(!index.abort.get()) {
-              if (streams.size() == index.barrier.getNumberWaiting()) {
+              if (nthreads == index.barrier.getNumberWaiting()) {
                 //
                 // Check if we should abort, which could happen when
                 // an exception was thrown when flushing the commits just before
@@ -1262,14 +1250,6 @@ public class Index {
                   break;
                 }
                   
-                //
-                // All processing threads are waiting on the barrier, this means we can flush the offsets because
-                // they have all processed data successfully for the given activity period
-                //
-                
-                // Commit offsets
-                connector.commitOffsets();
-                
                 // Release the waiting threads
                 try {
                   index.barrier.await();
@@ -1289,7 +1269,6 @@ public class Index {
             //
             
             executor.shutdownNow();
-            connector.shutdown();
             index.abort.set(false);
           } catch (Throwable t) {
             t.printStackTrace(System.out);
@@ -1303,11 +1282,11 @@ public class Index {
   private static final class IndexDataConsumer extends Thread {
     
     private final Index index;
-    private final KafkaStream<byte[],byte[]> stream;
-    
-    public IndexDataConsumer(Index index, KafkaStream<byte[], byte[]> stream) {
+    private final KafkaConsumer<byte[],byte[]> consumer;
+
+    public IndexDataConsumer(Index index, KafkaConsumer<byte[], byte[]> consumer) {
       this.index = index;
-      this.stream = stream;
+      this.consumer = consumer;
     }
     
     @Override
@@ -1317,7 +1296,6 @@ public class Index {
       long count = 0L;
       
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
         byte[] siphashKey = index.keystore.getKey(KeyStore.SIPHASH_KAFKA_DATA);
         byte[] aesKey = index.keystore.getKey(KeyStore.AES_KAFKA_DATA);
@@ -1417,25 +1395,17 @@ public class Index {
         
         // TODO(hbs): allow setting of writeBufferSize
 
-        while (iter.hasNext()) {
-          //
-          // Since the cal to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
+        while (true) {
+
+          ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+
+          for (ConsumerRecord<byte[], byte[]> record : records) {
             count++;
             if (count % 100000 == 0) {
               System.out.println("INDEX [" + System.currentTimeMillis() + "] >>> " + count);
             }
             
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            
-            byte[] data = msg.message();
+            byte[] data = record.value();
             
             if (null != siphashKey) {
               data = CryptoUtils.removeMAC(siphashKey, data);
@@ -1582,13 +1552,7 @@ public class Index {
                 }            
               }              
             }
-          } else {
-            // Sleep a tiny while
-            try {
-              Thread.sleep(2L);
-            } catch (InterruptedException ie) {             
-            }
-          }          
+          }
         }        
       } catch (Throwable t) {
         t.printStackTrace(System.out);

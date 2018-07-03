@@ -29,6 +29,7 @@ import io.warp10.crypto.KeyStore;
 import io.warp10.sensision.Sensision;
 
 import java.net.InetAddress;
+import java.util.Collections;
 import java.util.UUID;
 import java.io.BufferedReader;
 import java.io.File;
@@ -58,13 +59,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.message.MessageAndMetadata;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
@@ -82,6 +76,9 @@ import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.Bu
 import org.apache.hadoop.hbase.ipc.BlockingRpcCallback;
 import org.apache.hadoop.hbase.ipc.ServerRpcController;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.slf4j.Logger;
@@ -330,8 +327,7 @@ public class Store extends Thread {
       public void run() {
         
         ExecutorService executor = null;
-        ConsumerConnector connector = null;
-        
+
         StoreConsumer[] consumers = new StoreConsumer[nthreads];
         Table[] tables = new Table[nthreads];
         
@@ -351,11 +347,7 @@ public class Store extends Thread {
             // happens while talking to HBase, to get a chance to re-read data from the
             // previous snapshot).
             //
-            
-            Map<String,Integer> topicCountMap = new HashMap<String, Integer>();
-              
-            topicCountMap.put(topic, nthreads);
-                          
+
             Properties props = new Properties();
             props.setProperty("zookeeper.connect", properties.getProperty(io.warp10.continuum.Configuration.STORE_KAFKA_DATA_ZKCONNECT));
             props.setProperty("group.id", groupid);
@@ -380,17 +372,12 @@ public class Store extends Thread {
             // This is VERY important, offset MUST be reset to 'smallest' so we get a chance to store as many datapoints
             // as we can when the lag gets beyond the history Kafka maintains.
             //
-            props.setProperty("auto.offset.reset", "smallest");
-            
-            ConsumerConfig config = new ConsumerConfig(props);
-            connector = Consumer.createJavaConsumerConnector(config);
+            props.setProperty("auto.offset.reset", "earliest");
+            props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+            props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
 
-            Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-            
-            List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-            
-            self.barrier = new CyclicBarrier(streams.size() + 1);
-            
+            self.barrier = new CyclicBarrier(nthreads + 1);
+
             executor = Executors.newFixedThreadPool(nthreads);
     
             if (nthreadsDelete > 0) {
@@ -421,7 +408,7 @@ public class Store extends Thread {
               LockSupport.parkNanos(100000L);
             }
 
-            for (final KafkaStream<byte[],byte[]> stream : streams) {
+            for (int i = 0; i < nthreads; i++) {
               if (null != consumers[idx] && consumers[idx].getHBaseReset()) {
                 try {
                   tables[idx].close();
@@ -437,7 +424,9 @@ public class Store extends Thread {
                   throw new RuntimeException(t);
                 }
               }
-              consumers[idx] = new StoreConsumer(tables[idx], self, stream, counters);
+              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+              consumer.subscribe(Collections.singletonList(topic));
+              consumers[idx] = new StoreConsumer(tables[idx], self, consumer, counters);
               executor.submit(consumers[idx]);
               idx++;
             }      
@@ -446,7 +435,7 @@ public class Store extends Thread {
             
             while(!abort.get() && !Thread.currentThread().isInterrupted()) {
               try {
-                if (streams.size() == barrier.getNumberWaiting()) {
+                if (nthreads == barrier.getNumberWaiting()) {
                   //
                   // Check if we should abort, which could happen when
                   // an exception was thrown when flushing the commits just before
@@ -463,7 +452,6 @@ public class Store extends Thread {
                   //
                     
                   // Commit offsets
-                  connector.commitOffsets(true);
                   counters.sensisionPublish();
                   Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STORE_KAFKA_COMMITS, Sensision.EMPTY_LABELS, 1);
                   
@@ -504,22 +492,6 @@ public class Store extends Thread {
           } finally {
             if (LOG.isDebugEnabled()) {
               LOG.debug("Spawner reinitializing.");
-            }
-            
-            //
-            // We exited the loop, this means one of the threads triggered an abort,
-            // we will shut down the executor and shut down the connector to start over.
-            //
-        
-            if (null != connector) {
-              if (LOG.isDebugEnabled()) {
-                LOG.debug("Closing Kafka connector.");
-              }              
-              try {
-                connector.shutdown();
-              } catch (Exception e) {
-                LOG.error("Error while closing connector", e);
-              }
             }
 
             if (null != executor) {
@@ -654,23 +626,23 @@ public class Store extends Thread {
 //      //
 //      // Regenerate the HBase connection
 //      //
-//      
+//
 //      Connection newconn = null;
 //      Connection oldconn = this.conn;
-//      
+//
 //      try {
 //        newconn = ConnectionFactory.createConnection(this.config);
 //      } catch (IOException ioe) {
 //        LOG.error("Error while creating HBase connection.", ioe);
 //        continue;
 //      }
-//      
+//
 //      if (null != newconn) {
 //        this.conn = newconn;
 //      } else {
 //        continue;
 //      }
-//      
+//
 //      try {
 //        if (null != oldconn) {
 //          oldconn.close();
@@ -688,7 +660,7 @@ public class Store extends Thread {
     private boolean resetHBase = false;
     private boolean done = false;
     private final Store store;
-    private final KafkaStream<byte[],byte[]> stream;
+    private final KafkaConsumer<byte[],byte[]> consumer;
     private final byte[] hbaseAESKey;
     private Table table = null;
     private final AtomicLong lastPut = new AtomicLong(0L);
@@ -714,9 +686,9 @@ public class Store extends Thread {
     final AtomicBoolean inflightMessage = new AtomicBoolean(false);
     final AtomicBoolean needToSync = new AtomicBoolean(false);
 
-    public StoreConsumer(Table table, Store store, KafkaStream<byte[], byte[]> stream, KafkaOffsetCounters counters) {
+    public StoreConsumer(Table table, Store store, KafkaConsumer<byte[], byte[]> consumer, KafkaOffsetCounters counters) {
       this.store = store;
-      this.stream = stream;
+      this.consumer = consumer;
       this.puts = new ArrayList<Put>();
       this.counters = counters;
       this.table = table;
@@ -751,7 +723,6 @@ public class Store extends Thread {
       long count = 0L;
             
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
         byte[] siphashKey = store.keystore.getKey(KeyStore.SIPHASH_KAFKA_DATA);
         byte[] aesKey = store.keystore.getKey(KeyStore.AES_KAFKA_DATA);
@@ -1037,22 +1008,14 @@ public class Store extends Thread {
         // of resetting inflightMessage, this makes the code cleaner as we don't have to add calls to inflightMessage.set(false)
         // throughout the code
         
-        while (resetInflight() && iter.hasNext() && !Thread.currentThread().isInterrupted()) {
-          
+        while (resetInflight() && !Thread.currentThread().isInterrupted()) {
+
           // Clear the 'inflight' status
           inflightMessage.set(false);
-          
-          //
-          // Since the call to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
-            
+
+          ConsumerRecords<byte[], byte[]> consumerRecords = consumer.poll(500);
+          for (ConsumerRecord<byte[], byte[]> record : consumerRecords) {
+
             //
             // If throttling is defined, check if we should consume this message
             //
@@ -1093,10 +1056,9 @@ public class Store extends Thread {
             //
             
             count++;
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            self.counters.count(msg.partition(), msg.offset());
+            self.counters.count(record.partition(), record.offset());
             
-            byte[] data = msg.message();
+            byte[] data = record.value();
 
             Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STORE_KAFKA_COUNT, Sensision.EMPTY_LABELS, 1);
             Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STORE_KAFKA_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -1146,10 +1108,7 @@ public class Store extends Thread {
             }
             
 
-          } else {
-            // Sleep a tiny while
-            LockSupport.parkNanos(10000L);
-          }          
+          }
         }        
       } catch (Throwable t) {
         // FIXME(hbs): log something/update Sensision metrics

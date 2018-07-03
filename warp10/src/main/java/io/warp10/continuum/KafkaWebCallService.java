@@ -23,10 +23,10 @@ import io.warp10.script.thrift.data.WebCallRequest;
 
 import java.util.Properties;
 
-import kafka.javaapi.producer.Producer;
 import kafka.producer.KeyedMessage;
-import kafka.producer.ProducerConfig;
 
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 
@@ -36,7 +36,7 @@ public class KafkaWebCallService {
   
   private static boolean initialized = false;
   
-  private static Producer<byte[],byte[]> producer;
+  private static KafkaProducer<byte[],byte[]> producer;
   
   private static String topic;
   
@@ -76,7 +76,7 @@ public class KafkaWebCallService {
 
       KeyedMessage<byte[], byte[]> message = new KeyedMessage<byte[], byte[]>(topic, value);
       
-      producer.send(message);
+      producer.send(new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message()));
       
       return true;
     } catch (Exception e) {
@@ -131,9 +131,10 @@ public class KafkaWebCallService {
     properties.setProperty("producer.type","sync");
     properties.setProperty("serializer.class", "kafka.serializer.DefaultEncoder");
     properties.setProperty("partitioner.class", io.warp10.continuum.KafkaPartitioner.class.getName());
-    
-    ProducerConfig config = new ProducerConfig(properties);
-    producer = new Producer<byte[], byte[]>(config);
+    properties.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+    properties.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+
+    producer = new KafkaProducer<byte[], byte[]>(properties);
 
     topic = props.getProperty(Configuration.WEBCALL_KAFKA_TOPIC);
     

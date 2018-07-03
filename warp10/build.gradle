@@ -149,11 +149,15 @@ dependencies {
 
     // @see http://www.mail-archive.com/dev@kafka.apache.org/msg03829.html
     //compile("org.apache.kafka:kafka_2.9.2:0.8.1.1") {
-    compile("org.apache.kafka:kafka_2.11:0.8.2.2") {
+    compile("org.apache.kafka:kafka_2.11:1.0.1-mapr-1803") {
         exclude module: 'jms'
         exclude module: 'jmxtools'
         exclude module: 'jmxri'
     }
+
+    // MapR Streams
+    compile("com.mapr.streams:mapr-streams:6.0.1-mapr")
+
     testCompile 'junit:junit:4.6'
 }
 

@@ -25,8 +25,8 @@ import io.warp10.sensision.Sensision;
 import io.warp10.standalone.StandaloneWebCallService;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CyclicBarrier;
@@ -35,13 +35,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.message.MessageAndMetadata;
-
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.slf4j.Logger;
@@ -125,8 +121,7 @@ public class KafkaWebCallBroker extends Thread {
       public void run() {
         
         ExecutorService executor = null;
-        ConsumerConnector connector = null;
-        
+
         while(true) {
           try {
             //
@@ -149,16 +144,11 @@ public class KafkaWebCallBroker extends Thread {
             if (null != properties.getProperty(Configuration.WEBCALL_KAFKA_CONSUMER_PARTITION_ASSIGNMENT_STRATEGY)) {
               props.setProperty("partition.assignment.strategy", properties.getProperty(Configuration.WEBCALL_KAFKA_CONSUMER_PARTITION_ASSIGNMENT_STRATEGY));
             }
-            props.setProperty("auto.commit.enable", "false");    
+            props.setProperty("auto.commit.enable", "false");
+            props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+            props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
             
-            ConsumerConfig config = new ConsumerConfig(props);
-            connector = Consumer.createJavaConsumerConnector(config);
-            
-            Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-            
-            List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-            
-            self.barrier = new CyclicBarrier(streams.size() + 1);
+            self.barrier = new CyclicBarrier(nthreads + 1);
             
             executor = Executors.newFixedThreadPool(nthreads);
             
@@ -168,13 +158,16 @@ public class KafkaWebCallBroker extends Thread {
             
             counters.reset();
                         
-            for (final KafkaStream<byte[],byte[]> stream : streams) {
-              executor.submit(new WebCallConsumer(self, stream, counters));
+            for (int i = 0; i < nthreads; i++) {
+
+              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+              consumer.subscribe(Collections.singletonList(topic));
+              executor.submit(new WebCallConsumer(self, consumer, counters));
             }      
-                
+
             while(!abort.get() && !Thread.currentThread().isInterrupted()) {
               try {
-                if (streams.size() == barrier.getNumberWaiting()) {
+                if (nthreads == barrier.getNumberWaiting()) {
                   //
                   // Check if we should abort, which could happen when
                   // an exception was thrown when flushing the commits just before
@@ -190,9 +183,6 @@ public class KafkaWebCallBroker extends Thread {
                   // they have all processed data successfully for the given activity period
                   //
                     
-                  // Commit offsets
-                  connector.commitOffsets();
-
                   Sensision.update(SensisionConstants.SENSISION_CLASS_WEBCALL_KAFKA_IN_COMMITS, Sensision.EMPTY_LABELS, 1);
                   
                   // Release the waiting threads
@@ -222,14 +212,7 @@ public class KafkaWebCallBroker extends Thread {
               } catch (Exception e) {                
               }
             }
-            if (null != connector) {
-              try {
-                connector.shutdown();
-              } catch (Exception e) {
-                
-              }
-            }
-            
+
             Sensision.update(SensisionConstants.SENSISION_CLASS_WEBCALL_IN_ABORTS, Sensision.EMPTY_LABELS, 1);
             
             abort.set(false);
@@ -260,12 +243,12 @@ public class KafkaWebCallBroker extends Thread {
   
   private static class WebCallConsumer implements Runnable {
     private final KafkaWebCallBroker broker;
-    private final KafkaStream<byte[],byte[]> stream;
+    private final KafkaConsumer<byte[],byte[]> consumer;
     private final KafkaOffsetCounters counters;
     
-    public WebCallConsumer(KafkaWebCallBroker broker, KafkaStream<byte[], byte[]> stream, KafkaOffsetCounters counters) {
+    public WebCallConsumer(KafkaWebCallBroker broker, KafkaConsumer<byte[], byte[]> consumer, KafkaOffsetCounters counters) {
       this.broker = broker;
-      this.stream = stream;      
+      this.consumer = consumer;
       this.counters = counters;
     }
     
@@ -277,7 +260,6 @@ public class KafkaWebCallBroker extends Thread {
       long count = 0L;
       
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
         byte[] siphashKey = broker.keystore.getKey(KeyStore.SIPHASH_KAFKA_WEBCALL);
         byte[] aesKey = broker.keystore.getKey(KeyStore.AES_KAFKA_WEBCALL);
@@ -329,22 +311,13 @@ public class KafkaWebCallBroker extends Thread {
 
         TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
 
-        while (iter.hasNext()) {
-          //
-          // Since the call to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
+        while (true) {
+          ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+          for (ConsumerRecord<byte[], byte[]> record : records) {
             count++;
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            counters.count(msg.partition(), msg.offset());
+            counters.count(record.partition(), record.offset());
             
-            byte[] data = msg.message();
+            byte[] data = record.value();
 
             Sensision.update(SensisionConstants.SENSISION_CLASS_WEBCALL_KAFKA_IN_COUNT, Sensision.EMPTY_LABELS, 1);
             Sensision.update(SensisionConstants.SENSISION_CLASS_WEBCALL_KAFKA_IN_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -391,13 +364,8 @@ public class KafkaWebCallBroker extends Thread {
             
             StandaloneWebCallService.doCall(request);
             
-          } else {
-            // Sleep a tiny while
-            try {
-              Thread.sleep(2L);
-            } catch (InterruptedException ie) {             
-            }
-          }          
+          }
+
         }        
       } catch (Throwable t) {
         // FIXME(hbs): log something/update Sensision metrics

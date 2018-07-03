@@ -18,6 +18,7 @@ package io.warp10.continuum;
 
 import io.warp10.continuum.store.Directory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,7 +68,7 @@ public class KafkaSynchronizedConsumerPool {
   private final AtomicBoolean stopped = new AtomicBoolean(false);
   
   public static interface ConsumerFactory {
-    public Runnable getConsumer(KafkaSynchronizedConsumerPool pool, KafkaStream<byte[], byte[]> stream);
+    public Runnable getConsumer(KafkaSynchronizedConsumerPool pool, KafkaConsumer<byte[], byte[]> consumer);
   }
 
   public static interface Hook {
@@ -175,6 +177,8 @@ public class KafkaSynchronizedConsumerPool {
           Properties props = new Properties();
           props.setProperty("zookeeper.connect", this.zkconnect);
           props.setProperty("group.id",this.groupid);
+          props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+          props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
           if (null != this.clientid) {
             props.setProperty("client.id", this.clientid);
           }
@@ -187,16 +191,10 @@ public class KafkaSynchronizedConsumerPool {
             props.setProperty("auto.offset.reset", this.autoOffsetReset);
           }
           
-          ConsumerConfig config = new ConsumerConfig(props);
-          connector = Consumer.createJavaConsumerConnector(config);
-
-          Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-          
           // Reset counters so we only export metrics for partitions we really consume
           pool.getCounters().reset();
           
-          List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-            
+
           // 1 for the Synchronizer, 1 for the Spawner
           
           pool.setBarrier(new CyclicBarrier(1 + 1));
@@ -207,8 +205,10 @@ public class KafkaSynchronizedConsumerPool {
           // now create runnables which will consume messages
           //
             
-          for (final KafkaStream<byte[],byte[]> stream : streams) {
-            executor.submit(factory.getConsumer(pool,stream));
+          for (int i = 0; i < nthreads; i++) {
+            KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+            consumer.subscribe(Collections.singletonList(topic));
+            executor.submit(factory.getConsumer(pool,consumer));
           }      
                 
           pool.getInitialized().set(true);

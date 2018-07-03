@@ -49,10 +49,10 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import kafka.javaapi.producer.Producer;
 import kafka.producer.KeyedMessage;
-import kafka.producer.ProducerConfig;
 
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.joda.time.format.DateTimeFormat;
@@ -200,7 +200,7 @@ public class ThrottlingManager {
   
   private static boolean enabled = false;
   
-  private static Producer<byte[],byte[]> throttlingProducer = null;
+  private static KafkaProducer<byte[],byte[]> throttlingProducer = null;
   private static String throttlingTopic = null;
   private static byte[] throttlingMAC = null;
   
@@ -643,9 +643,10 @@ public class ThrottlingManager {
         dataProps.setProperty("request.timeout.ms", properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_REQUEST_TIMEOUT_MS));
       }
 
-      ProducerConfig dataConfig = new ProducerConfig(dataProps);
-      
-      throttlingProducer = new Producer<byte[],byte[]>(dataConfig);
+      dataProps.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+      dataProps.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+
+      throttlingProducer = new KafkaProducer<>(dataProps);
       throttlingTopic = properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_TOPIC);
     }
     
@@ -1015,8 +1016,7 @@ public class ThrottlingManager {
         }
 
         KeyedMessage<byte[], byte[]> message = new KeyedMessage<byte[], byte[]>(throttlingTopic, bytes);
-        
-        throttlingProducer.send(message);
+        throttlingProducer.send(new ProducerRecord<>(message.topic(), message.key(), message.message()));
         Sensision.update(SensisionConstants.CLASS_WARP_INGRESS_KAFKA_THROTTLING_OUT_MESSAGES, Sensision.EMPTY_LABELS, 1);
         Sensision.update(SensisionConstants.CLASS_WARP_INGRESS_KAFKA_THROTTLING_OUT_BYTES, Sensision.EMPTY_LABELS, bytes.length);
       } catch (Exception e) {

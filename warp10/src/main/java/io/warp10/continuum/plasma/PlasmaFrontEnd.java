@@ -23,10 +23,8 @@ import io.warp10.continuum.KafkaSynchronizedConsumerPool;
 import io.warp10.continuum.KafkaSynchronizedConsumerPool.ConsumerFactory;
 import io.warp10.continuum.KafkaSynchronizedConsumerPool.Hook;
 import io.warp10.continuum.egress.ThriftDirectoryClient;
-import io.warp10.continuum.gts.GTSDecoder;
 import io.warp10.continuum.gts.GTSEncoder;
 import io.warp10.continuum.sensision.SensisionConstants;
-import io.warp10.continuum.store.Directory;
 import io.warp10.continuum.store.DirectoryClient;
 import io.warp10.continuum.store.thrift.data.KafkaDataMessage;
 import io.warp10.crypto.CryptoUtils;
@@ -36,7 +34,6 @@ import io.warp10.sensision.Sensision;
 import io.warp10.standalone.StandalonePlasmaHandler;
 
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,10 +43,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.message.MessageAndMetadata;
-
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.apache.zookeeper.CreateMode;
@@ -173,12 +169,10 @@ public class PlasmaFrontEnd extends StandalonePlasmaHandler implements Runnable,
     
     ConsumerFactory factory = new ConsumerFactory() {      
       @Override
-      public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaStream<byte[], byte[]> stream) {
-        return new Runnable() {          
+      public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaConsumer<byte[], byte[]> consumer) {
+        return new Runnable() {
           @Override
           public void run() {
-            ConsumerIterator<byte[],byte[]> iter = stream.iterator();
-
             byte[] sipHashKey = frontend.keystore.getKey(KeyStore.SIPHASH_KAFKA_PLASMA_FRONTEND_IN);
             byte[] aesKey = frontend.keystore.getKey(KeyStore.AES_KAFKA_PLASMA_FRONTEND_IN);
 
@@ -190,19 +184,12 @@ public class PlasmaFrontEnd extends StandalonePlasmaHandler implements Runnable,
             // TODO(hbs): allow setting of writeBufferSize
 
             try {
-            while (iter.hasNext()) {
-              //
-              // Since the cal to 'next' may block, we need to first
-              // check that there is a message available
-              //
-              
-              boolean nonEmpty = iter.nonEmpty();
-              
-              if (nonEmpty) {
-                MessageAndMetadata<byte[], byte[]> msg = iter.next();
-                counters.count(msg.partition(), msg.offset());
+            while (true) {
+              ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+              for (ConsumerRecord<byte[], byte[]> record : records) {
+                counters.count(record.partition(), record.offset());
                 
-                byte[] data = msg.message();
+                byte[] data = record.value();
 
                 Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_FRONTEND_KAFKA_MESSAGES, Sensision.EMPTY_LABELS, 1);
                 Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_FRONTEND_KAFKA_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -248,13 +235,7 @@ public class PlasmaFrontEnd extends StandalonePlasmaHandler implements Runnable,
                   default:
                     throw new RuntimeException("Invalid message type.");
                 }            
-              } else {
-                // Sleep a tiny while
-                try {
-                  Thread.sleep(1L);
-                } catch (InterruptedException ie) {             
-                }
-              }          
+              }
             }        
           } catch (Throwable t) {
             t.printStackTrace(System.err);

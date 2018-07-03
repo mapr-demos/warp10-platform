@@ -56,6 +56,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -84,15 +85,7 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.message.MessageAndMetadata;
-
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
@@ -103,6 +96,9 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
@@ -132,7 +128,6 @@ import org.slf4j.LoggerFactory;
 import com.google.common.base.Charsets;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.MapMaker;
-import com.google.common.primitives.Longs;
 import com.netflix.curator.framework.CuratorFramework;
 import com.netflix.curator.framework.CuratorFrameworkFactory;
 import com.netflix.curator.retry.RetryNTimes;
@@ -871,13 +866,12 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
         
         while (true) {
           try {
-            Map<String,Integer> topicCountMap = new HashMap<String, Integer>();
-            
-            topicCountMap.put(topic, nthreads);
                         
             Properties props = new Properties();
             props.setProperty("zookeeper.connect", properties.getProperty(io.warp10.continuum.Configuration.DIRECTORY_KAFKA_METADATA_ZKCONNECT));
             props.setProperty("group.id", groupid);
+            props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+            props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
             if (null != properties.getProperty(io.warp10.continuum.Configuration.DIRECTORY_KAFKA_METADATA_CONSUMER_CLIENTID)) {
               props.setProperty("client.id", properties.getProperty(io.warp10.continuum.Configuration.DIRECTORY_KAFKA_METADATA_CONSUMER_CLIENTID));
             }
@@ -890,31 +884,25 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
               props.setProperty("auto.offset.reset", properties.getProperty(io.warp10.continuum.Configuration.DIRECTORY_KAFKA_METADATA_CONSUMER_AUTO_OFFSET_RESET));
             }
             
-            ConsumerConfig config = new ConsumerConfig(props);
-            ConsumerConnector connector = Consumer.createJavaConsumerConnector(config);
-
-            Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-            
-            List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-            
-            self.barrier = new CyclicBarrier(streams.size() + 1);
+            self.barrier = new CyclicBarrier(nthreads + 1);
 
             ExecutorService executor = Executors.newFixedThreadPool(nthreads);
             
             //
             // now create runnables which will consume messages
             //
-            
             // Reset counters
             counters.reset();
             
-            for (final KafkaStream<byte[],byte[]> stream : streams) {
-              executor.submit(new DirectoryConsumer(self, stream, counters));
+            for (int i = 0; i < nthreads; i++) {
+              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+              consumer.subscribe(Collections.singletonList(topic));
+              executor.submit(new DirectoryConsumer(self, consumer, counters));
             }      
 
             while(!abort.get() && !Thread.currentThread().isInterrupted()) {
               try {
-                if (streams.size() == barrier.getNumberWaiting()) {
+                if (nthreads == barrier.getNumberWaiting()) {
                   //
                   // Check if we should abort, which could happen when
                   // an exception was thrown when flushing the commits just before
@@ -930,18 +918,7 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
                   // they have all processed data successfully for the given activity period
                   //
 
-                  // Commit offsets
-                  try {
-                    connector.commitOffsets(true);
-                  } catch (Throwable t) {
-                    throw t;
-                  } finally {
-                    // We instruct the counters that we committed the offsets, in the worst case
-                    // we will experience a backward leap which is not fatal, whereas missing
-                    // a commit will lead to a forward leap which will make the Directory fail
-                    counters.commit();
-                  }
-                                   
+                  counters.commit();
                   counters.sensisionPublish();
                   
                   Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_DIRECTORY_KAFKA_COMMITS, Sensision.EMPTY_LABELS, 1);
@@ -969,7 +946,6 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
             
             executor.shutdownNow();
             Sensision.update(SensisionConstants.SENSISION_CLASS_WARP_DIRECTORY_KAFKA_SHUTDOWNS, Sensision.EMPTY_LABELS, 1);
-            connector.shutdown();
           } catch (Throwable t) {
             LOG.error("Caught throwable in spawner.", t);
           } finally {
@@ -1193,15 +1169,15 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
   private static class DirectoryConsumer implements Runnable {
 
     private final Directory directory;
-    private final KafkaStream<byte[],byte[]> stream;
-        
+    private final KafkaConsumer<byte[],byte[]> consumer;
+
     private final KafkaOffsetCounters counters;
     
     private final AtomicBoolean localabort = new AtomicBoolean(false);
     
-    public DirectoryConsumer(Directory directory, KafkaStream<byte[], byte[]> stream, KafkaOffsetCounters counters) {
+    public DirectoryConsumer(Directory directory, KafkaConsumer<byte[], byte[]> consumer, KafkaOffsetCounters counters) {
       this.directory = directory;
-      this.stream = stream;
+      this.consumer = consumer;
       this.counters = counters;
     }
     
@@ -1210,7 +1186,6 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
       Table htable = null;
 
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
         byte[] siphashKey = directory.keystore.getKey(KeyStore.SIPHASH_KAFKA_METADATA);
         byte[] kafkaAESKey = directory.keystore.getKey(KeyStore.AES_KAFKA_METADATA);
@@ -1388,21 +1363,12 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
         MetadataID id = null;
         
         byte[] hbaseAESKey = directory.keystore.getKey(KeyStore.AES_HBASE_METADATA);
-        
-        while (iter.hasNext()) {
-          Sensision.set(SensisionConstants.SENSISION_CLASS_CONTINUUM_DIRECTORY_JVM_FREEMEMORY, Sensision.EMPTY_LABELS, Runtime.getRuntime().freeMemory());
 
-          //
-          // Since the call to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
+        while (true) {
+          Sensision.set(SensisionConstants.SENSISION_CLASS_CONTINUUM_DIRECTORY_JVM_FREEMEMORY, Sensision.EMPTY_LABELS, Runtime.getRuntime().freeMemory());
+          ConsumerRecords<byte[], byte[]> consumerRecords = consumer.poll(500);
+          for(ConsumerRecord<byte[], byte[]> msg : consumerRecords) {
+
             if (!counters.safeCount(msg.partition(), msg.offset())) {
               continue;
             }
@@ -1423,7 +1389,7 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
             // We therefore unwrap all messages and decide later.
             //
             
-            byte[] data = msg.message();
+            byte[] data = msg.value();
             
             if (null != siphashKey) {
               data = CryptoUtils.removeMAC(siphashKey, data);
@@ -1782,11 +1748,8 @@ public class Directory extends AbstractHandler implements DirectoryService.Iface
                 actionsLock.unlock();
               }
             }
-          } else {
-            // Sleep a tiny while
-            LockSupport.parkNanos(2000000L);
-          }          
-        }        
+          }
+        }
       } catch (Throwable t) {
         LOG.error("", t);
       } finally {

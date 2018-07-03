@@ -88,13 +88,14 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import kafka.javaapi.producer.Producer;
 import kafka.producer.KeyedMessage;
 import kafka.producer.ProducerConfig;
 
 import org.apache.commons.lang3.JavaVersion;
 import org.apache.commons.lang3.SystemUtils;
 import org.apache.hadoop.util.ShutdownHookManager;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
@@ -219,7 +220,7 @@ public class Ingress extends AbstractHandler implements Runnable {
   /**
    * Pool of producers for the 'data' topic
    */
-  private final Producer<byte[], byte[]>[] dataProducers;
+  private final KafkaProducer<byte[], byte[]>[] dataProducers;
   
   private int dataProducersCurrentPoolSize = 0;
   
@@ -394,10 +395,16 @@ public class Ingress extends AbstractHandler implements Runnable {
     // Allocate producer pool
     //
     
-    this.dataProducers = new Producer[Integer.parseInt(props.getProperty(Configuration.INGRESS_KAFKA_DATA_POOLSIZE))];
+    this.dataProducers = new KafkaProducer[Integer.parseInt(props.getProperty(Configuration.INGRESS_KAFKA_DATA_POOLSIZE))];
     
     for (int i = 0; i < dataProducers.length; i++) {
-      this.dataProducers[i] = new Producer<byte[], byte[]>(dataConfig);
+
+      Properties properties = new Properties(dataConfig.props().props());
+      properties.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+      properties.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+
+
+      this.dataProducers[i] = new KafkaProducer<byte[], byte[]>(properties);
     }
     
     this.dataProducersCurrentPoolSize = this.dataProducers.length;
@@ -1609,7 +1616,7 @@ public class Ingress extends AbstractHandler implements Runnable {
     }
     
     if (msglist.size() > 0 && (null == key || null == value || mms.get() > METADATA_MESSAGES_THRESHOLD)) {
-      Producer<byte[],byte[]> producer = this.metaProducerPool.getProducer();
+      KafkaProducer<byte[],byte[]> producer = this.metaProducerPool.getProducer();
       try {
 
         //
@@ -1618,7 +1625,10 @@ public class Ingress extends AbstractHandler implements Runnable {
 
         long nano = System.nanoTime();
 
-        producer.send(msglist);
+        for(KeyedMessage<byte[], byte[]> message: msglist) {
+          ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message());
+          producer.send(record);
+        }
 
         nano = System.nanoTime() - nano;
         Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_INGRESS_KAFKA_METADATA_PRODUCER_SEND, Sensision.EMPTY_LABELS, nano);
@@ -1721,7 +1731,7 @@ public class Ingress extends AbstractHandler implements Runnable {
     }
 
     if (msglist.size() > 0 && (null == msg || dms.get() > DATA_MESSAGES_THRESHOLD)) {
-      Producer<byte[],byte[]> producer = getDataProducer();
+      KafkaProducer<byte[],byte[]> producer = getDataProducer();
       //this.dataProducer.send(msglist);
       try {
 
@@ -1731,8 +1741,9 @@ public class Ingress extends AbstractHandler implements Runnable {
 
         long nano = System.nanoTime();
 
-        producer.send(msglist);
-
+        for(KeyedMessage<byte[], byte[]> message : msglist) {
+          producer.send(new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message()));
+        }
         nano = System.nanoTime() - nano;
         Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_INGRESS_KAFKA_DATA_PRODUCER_SEND, Sensision.EMPTY_LABELS, nano);
 
@@ -1747,8 +1758,8 @@ public class Ingress extends AbstractHandler implements Runnable {
     }        
   }
   
-  private Producer<byte[],byte[]> getDataProducer() {
-    
+  private KafkaProducer<byte[],byte[]> getDataProducer() {
+
     //
     // We will count how long we wait for a producer
     //
@@ -1764,8 +1775,8 @@ public class Ingress extends AbstractHandler implements Runnable {
           // hand out the producer at index 0
           //
           
-          Producer<byte[],byte[]> producer = this.dataProducers[0];
-          
+          KafkaProducer<byte[],byte[]> producer = this.dataProducers[0];
+
           //
           // Decrement current pool size
           //
@@ -1794,8 +1805,8 @@ public class Ingress extends AbstractHandler implements Runnable {
     }    
   }
   
-  private void recycleDataProducer(Producer<byte[],byte[]> producer) {
-    
+  private void recycleDataProducer(KafkaProducer<byte[],byte[]> producer) {
+
     if (this.dataProducersCurrentPoolSize == this.dataProducers.length) {
       throw new RuntimeException("Invalid call to recycleProducer, pool already full!");
     }

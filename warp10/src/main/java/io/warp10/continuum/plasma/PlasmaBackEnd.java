@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -41,18 +42,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.javaapi.producer.Producer;
-import kafka.message.MessageAndMetadata;
 import kafka.producer.KeyedMessage;
-import kafka.producer.ProducerConfig;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
@@ -107,7 +104,7 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
   private boolean identicalSipHashKeys = false;
   private boolean identicalAESKeys = false;
   
-  private final Producer<byte[],byte[]> kafkaProducer;
+  private final KafkaProducer<byte[],byte[]> kafkaProducer;
   
   private final List<KeyedMessage<byte[], byte[]>> msglist = new ArrayList<KeyedMessage<byte[],byte[]>>();
   
@@ -164,13 +161,13 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
     dataProps.setProperty("producer.type","sync");
     dataProps.setProperty("serializer.class", "kafka.serializer.DefaultEncoder");
     dataProps.setProperty("partitioner.class", io.warp10.continuum.KafkaPartitioner.class.getName());
-
+    dataProps.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+    dataProps.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
     // FIXME(hbs): compression does not work
     //dataProps.setProperty("compression.codec", "snappy");
     //dataProps.setProperty("client.id","");
 
-    ProducerConfig dataConfig = new ProducerConfig(dataProps);
-    this.kafkaProducer = new Producer<byte[], byte[]>(dataConfig);
+    this.kafkaProducer = new KafkaProducer<>(dataProps);
 
     //
     // Launch a Thread which will populate the metadata cache
@@ -198,10 +195,6 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
         
         while (true) {
           try {
-            Map<String,Integer> topicCountMap = new HashMap<String, Integer>();
-            
-            topicCountMap.put(properties.getProperty(io.warp10.continuum.Configuration.PLASMA_BACKEND_KAFKA_IN_TOPIC), nthreads);
-                    
             Properties props = new Properties();
             props.setProperty("zookeeper.connect", properties.getProperty(io.warp10.continuum.Configuration.PLASMA_BACKEND_KAFKA_IN_ZKCONNECT));
             props.setProperty("group.id", groupid);
@@ -215,24 +208,22 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
             if (null != strategy) {
               props.setProperty("partition.assignment.strategy", strategy);
             }
-            ConsumerConfig config = new ConsumerConfig(props);
-            ConsumerConnector connector = Consumer.createJavaConsumerConnector(config);
+            props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+            props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
 
             // Reset the counters
             counters.reset();
             
-            Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-            
-            List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
-
             ExecutorService executor = Executors.newFixedThreadPool(nthreads);
             
             //
             // now create runnables which will consume messages
             //
             
-            for (final KafkaStream<byte[],byte[]> stream : streams) {
-              executor.submit(new KafkaConsumer(self, stream, counters));
+            for (int i = 0; i < nthreads; i++) {
+              org.apache.kafka.clients.consumer.KafkaConsumer<byte[], byte[]> consumer = new org.apache.kafka.clients.consumer.KafkaConsumer<>(props);
+              consumer.subscribe(Collections.singletonList(topic));
+              executor.submit(new KafkaConsumer(self, consumer, counters));
             }      
             
             long lastsync = 0L;
@@ -246,7 +237,6 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
               
               if (System.currentTimeMillis() - lastsync > commitPeriod) {
                 try { 
-                  connector.commitOffsets();
                   counters.sensisionPublish();
                   lastsync = System.currentTimeMillis();
                 } catch (Exception e) {
@@ -261,7 +251,6 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
             //
             
             executor.shutdownNow();
-            connector.shutdown();
             abort.set(false);
           } catch (Throwable t) {
             t.printStackTrace(System.err);
@@ -514,12 +503,12 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
   private static class KafkaConsumer implements Runnable {
 
     private final PlasmaBackEnd backend;
-    private final KafkaStream<byte[],byte[]> stream;
+    private final org.apache.kafka.clients.consumer.KafkaConsumer<byte[],byte[]> consumer;
     private final KafkaOffsetCounters counters;
     
-    public KafkaConsumer(PlasmaBackEnd backend, KafkaStream<byte[], byte[]> stream, KafkaOffsetCounters counters) {
+    public KafkaConsumer(PlasmaBackEnd backend, org.apache.kafka.clients.consumer.KafkaConsumer<byte[], byte[]> consumer, KafkaOffsetCounters counters) {
       this.backend = backend;
-      this.stream = stream;
+      this.consumer = consumer;
       this.counters = counters;
     }
     
@@ -530,8 +519,6 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
       byte[] clslbls = new byte[16];
       
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
-
         byte[] inSipHashKey = backend.keystore.getKey(KeyStore.SIPHASH_KAFKA_PLASMA_BACKEND_IN);
         byte[] inAESKey = backend.keystore.getKey(KeyStore.AES_KAFKA_PLASMA_BACKEND_IN);
 
@@ -543,25 +530,18 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
 
         // TODO(hbs): allow setting of writeBufferSize
 
-        while (iter.hasNext()) {
-          //
-          // Since the cal to 'next' may block, we need to first
-          // check that there is a message available
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
+        while (true) {
+          ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+          for (ConsumerRecord<byte[], byte[]> record : records) {
             count++;
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            counters.count(msg.partition(), msg.offset());
+            counters.count(record.partition(), record.offset());
             
             // Do nothing if there are no subscriptions
             if (null == backend.subscriptions || backend.subscriptions.isEmpty()) {
               continue;
             }
             
-            byte[] data = msg.message();
+            byte[] data = record.value();
 
             Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_BACKEND_KAFKA_IN_MESSAGES, Sensision.EMPTY_LABELS, 1);
             Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_BACKEND_KAFKA_IN_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -596,7 +576,7 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
             
             switch(tmsg.getType()) {
               case STORE:
-                backend.dispatch(clslbls, msg, tmsg, outSipHashKey, outAESKey);              
+                backend.dispatch(clslbls, record, tmsg, outSipHashKey, outAESKey);
                 break;
               case DELETE:
               case ARCHIVE:
@@ -604,14 +584,8 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
               default:
                 throw new RuntimeException("Invalid message type.");
             }            
-          } else {
-            // Sleep a tiny while
-            try {
-              Thread.sleep(1L);
-            } catch (InterruptedException ie) {             
-            }
-          }          
-        }        
+          }
+        }
       } catch (Throwable t) {
         t.printStackTrace(System.err);
       } finally {
@@ -622,13 +596,13 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
   }
 
   /**
-   * Dispatch the message to the various topics
+   * Dispatch the record to the various topics
    * 
    * @param clslbls stable array to extract classId/labelsId
-   * @param message Original message, its key/value will be re-used if SipHash/AES keys match
-   * @param msg payload of the original message, in case we need to re-hash/re-encrypt it
+   * @param record Original record, its key/value will be re-used if SipHash/AES keys match
+   * @param msg payload of the original record, in case we need to re-hash/re-encrypt it
    */
-  private void dispatch(byte[] clslbls, MessageAndMetadata<byte[], byte[]> message, KafkaDataMessage msg, byte[] outSipHashKey, byte[] outAESKey) {
+  private void dispatch(byte[] clslbls, ConsumerRecord<byte[], byte[]> record, KafkaDataMessage msg, byte[] outSipHashKey, byte[] outAESKey) {
     
     if (null == this.subscriptions || this.subscriptions.isEmpty()) {
       return;
@@ -648,10 +622,10 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
 
     Map<String,Set<BigInteger>> subs = this.subscriptions;
 
-    // Is the message ready to be sent?
+    // Is the record ready to be sent?
     boolean msgReady = this.identicalAESKeys && this.identicalSipHashKeys;
         
-    byte[] key = message.key();
+    byte[] key = record.key();
     byte[] value = null;
     
     Map<String,String> labels = new HashMap<String, String>();
@@ -662,13 +636,13 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
       }
 
       //
-      // Repackage the message
+      // Repackage the record
       //
     
       KeyedMessage<byte[], byte[]> outmsg = null;
 
       if (msgReady) {
-        value = message.message();
+        value = record.value();
         outmsg = new KeyedMessage<byte[], byte[]>(topic, key, value);
       } else {
         if (null == value) {
@@ -726,7 +700,11 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
     // to fix Ingress at some point.
     
     if (msglist.size() > 0 && (null == msg || msgsize.get() + thismsg > KAFKA_OUT_MAXSIZE)) {
-      this.kafkaProducer.send(msglist);
+
+      for(KeyedMessage<byte[], byte[]> message: msglist) {
+        this.kafkaProducer.send(new ProducerRecord<>(message.topic(), message.key(), message.message()));
+      }
+
       Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_BACKEND_KAFKA_OUT_SENT, Sensision.EMPTY_LABELS, 1);
       msglist.clear();
       msgsize.set(0L);

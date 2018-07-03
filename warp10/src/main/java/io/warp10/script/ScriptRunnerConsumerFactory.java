@@ -37,10 +37,9 @@ import java.util.Map;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.zip.GZIPInputStream;
 
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.message.MessageAndMetadata;
-
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 
@@ -56,12 +55,11 @@ public class ScriptRunnerConsumerFactory implements ConsumerFactory {
   }
   
   @Override
-  public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaStream<byte[], byte[]> stream) {
-    
+  public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaConsumer<byte[], byte[]> consumer) {
+
     return new Runnable() {          
       @Override
       public void run() {
-        ConsumerIterator<byte[],byte[]> iter = stream.iterator();
 
         // Iterate on the messages
         TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
@@ -69,19 +67,18 @@ public class ScriptRunnerConsumerFactory implements ConsumerFactory {
         KafkaOffsetCounters counters = pool.getCounters();
         
         try {
-          while (iter.hasNext()) {
+          while (true) {
+
+            ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
             //
             // Since the call to 'next' may block, we need to first
             // check that there is a message available
             //
             
-            boolean nonEmpty = iter.nonEmpty();
-            
-            if (nonEmpty) {
-              MessageAndMetadata<byte[], byte[]> msg = iter.next();
-              counters.count(msg.partition(), msg.offset());
+            for (ConsumerRecord<byte[], byte[]> record : records) {
+              counters.count(record.partition(), record.offset());
               
-              byte[] data = msg.message();
+              byte[] data = record.value();
 
               Sensision.update(SensisionConstants.SENSISION_CLASS_WARP_RUNNER_KAFKA_IN_MESSAGES, Sensision.EMPTY_LABELS, 1);
               Sensision.update(SensisionConstants.SENSISION_CLASS_WARP_RUNNER_KAFKA_IN_BYTES, Sensision.EMPTY_LABELS, data.length);

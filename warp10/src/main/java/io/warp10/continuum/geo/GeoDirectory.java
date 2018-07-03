@@ -79,14 +79,15 @@ import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.producer.Producer;
-import kafka.message.MessageAndMetadata;
 import kafka.producer.KeyedMessage;
 import kafka.producer.ProducerConfig;
 
 import org.apache.hadoop.util.ShutdownHookManager;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
@@ -256,8 +257,8 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
    */
   private final AtomicBoolean selectorsChanged = new AtomicBoolean(false);
   
-  private final Producer<byte[], byte[]> subsProducer;
-  private final Producer<byte[], byte[]> plasmaProducer;
+  private final KafkaProducer<byte[], byte[]> subsProducer;
+  private final KafkaProducer<byte[], byte[]> plasmaProducer;
   
   private final GeoIndex index;
 
@@ -415,11 +416,13 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     subsProps.setProperty("request.required.acks", "-1");
     subsProps.setProperty("producer.type","sync");
     subsProps.setProperty("serializer.class", "kafka.serializer.DefaultEncoder");
+    subsProps.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+    subsProps.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+
     // We use the default partitioner
     //dataProps.setProperty("partitioner.class", ...);
 
-    ProducerConfig subsConfig = new ProducerConfig(subsProps);
-    this.subsProducer = new Producer<byte[], byte[]>(subsConfig);
+    this.subsProducer = new KafkaProducer<byte[], byte[]>(subsProps);
 
     //
     // Create the outbound Kafka producer for data
@@ -437,9 +440,10 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     plasmaProps.setProperty("producer.type","sync");
     plasmaProps.setProperty("serializer.class", "kafka.serializer.DefaultEncoder");
     plasmaProps.setProperty("partitioner.class", io.warp10.continuum.KafkaPartitioner.class.getName());
+    plasmaProps.put("key.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
+    plasmaProps.put("value.serializer","org.apache.kafka.common.serialization.ByteArraySerializer");
 
-    ProducerConfig plasmaConfig = new ProducerConfig(plasmaProps);
-    this.plasmaProducer = new Producer<byte[], byte[]>(plasmaConfig);
+    this.plasmaProducer = new KafkaProducer<byte[], byte[]>(plasmaProps);
     
     //
     // Extract keys
@@ -903,7 +907,7 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     //
     
     KeyedMessage<byte[], byte[]> message = new KeyedMessage<byte[], byte[]>(this.subsTopic, data);
-    this.subsProducer.send(message);
+    this.subsProducer.send(new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message()));
     
     response.setStatus(HttpServletResponse.SC_OK);
   }
@@ -1170,7 +1174,11 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     
     synchronized(msglist) {
       if (msglist.size() > 0 && (null == outmsg || msgsize.get() + thismsg > KAFKA_OUT_MAXSIZE)) {
-        this.plasmaProducer.send(msglist);
+
+        for(KeyedMessage<byte[], byte[]> message : msglist) {
+          this.plasmaProducer.send(new ProducerRecord<byte[], byte[]>(message.topic(), message.key(), message.message()));
+        }
+
         Map<String,String> labels = new HashMap<String, String>();
         labels.put(SensisionConstants.SENSISION_LABEL_GEODIR, this.name);
         Sensision.update(SensisionConstants.SENSISION_CLASS_GEODIR_DATA_KAFKA_OUT_SENT, labels, 1);
@@ -1711,11 +1719,10 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     }
     
     @Override
-    public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaStream<byte[], byte[]> stream) {
-      return new Runnable() {          
+    public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaConsumer<byte[], byte[]> consumer) {
+      return new Runnable() {
         @Override
         public void run() {
-          ConsumerIterator<byte[],byte[]> iter = stream.iterator();
 
           // Iterate on the messages
           TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
@@ -1725,19 +1732,16 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
           // TODO(hbs): allow setting of writeBufferSize
 
           try {
-            while (iter.hasNext()) {
+            while (true) {
               //
               // Since the call to 'next' may block, we need to first
               // check that there is a message available
               //
-              
-              boolean nonEmpty = iter.nonEmpty();
-              
-              if (nonEmpty) {
-                MessageAndMetadata<byte[], byte[]> msg = iter.next();
-                counters.count(msg.partition(), msg.offset());
+              ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+              for (ConsumerRecord<byte[], byte[]> record : records) {
+                counters.count(record.partition(), record.offset());
                 
-                byte[] data = msg.message();
+                byte[] data = record.value();
 
                 Sensision.update(SensisionConstants.SENSISION_CLASS_GEODIR_SUBS_KAFKA_MESSAGES, Sensision.EMPTY_LABELS, 1);
                 Sensision.update(SensisionConstants.SENSISION_CLASS_GEODIR_SUBS_KAFKA_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -1835,13 +1839,7 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
                     directory.selectorsChanged.set(true);
                   }
                 }
-              } else {
-                // Sleep a tiny while
-                try {
-                  Thread.sleep(1L);
-                } catch (InterruptedException ie) {             
-                }
-              }          
+              }
             }        
           } catch (Throwable t) {
             t.printStackTrace(System.err);
@@ -1864,11 +1862,10 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
     }
       
     @Override
-    public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaStream<byte[], byte[]> stream) {
-      return new Runnable() {          
+    public Runnable getConsumer(final KafkaSynchronizedConsumerPool pool, final KafkaConsumer<byte[], byte[]> consumer) {
+      return new Runnable() {
         @Override
         public void run() {
-          ConsumerIterator<byte[],byte[]> iter = stream.iterator();
 
           // Iterate on the messages
           TDeserializer deserializer = new TDeserializer(new TCompactProtocol.Factory());
@@ -1876,19 +1873,12 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
           KafkaOffsetCounters counters = pool.getCounters();
           
           try {
-            while (iter.hasNext()) {
-              //
-              // Since the call to 'next' may block, we need to first
-              // check that there is a message available
-              //
-              
-              boolean nonEmpty = iter.nonEmpty();
-              
-              if (nonEmpty) {
-                MessageAndMetadata<byte[], byte[]> msg = iter.next();
-                counters.count(msg.partition(), msg.offset());
+            while (true) {
+              ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+              for (ConsumerRecord<byte[], byte[]> record : records) {
+                counters.count(record.partition(), record.offset());
                 
-                byte[] data = msg.message();
+                byte[] data = record.value();
 
                 Sensision.update(SensisionConstants.SENSISION_CLASS_GEODIR_DATA_KAFKA_MESSAGES, Sensision.EMPTY_LABELS, 1);
                 Sensision.update(SensisionConstants.SENSISION_CLASS_GEODIR_DATA_KAFKA_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -1934,14 +1924,8 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
                   default:
                     throw new RuntimeException("Invalid message type.");
                 }                            
-              } else {
-                // Sleep a tiny while
-                try {
-                  Thread.sleep(1L);
-                } catch (InterruptedException ie) {             
-                }
-              }          
-            }        
+              }
+            }
           } catch (Throwable t) {
             t.printStackTrace(System.err);
           } finally {

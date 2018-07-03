@@ -30,8 +30,8 @@ import io.warp10.crypto.KeyStore;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
@@ -39,13 +39,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
-import kafka.consumer.Consumer;
-import kafka.consumer.ConsumerConfig;
-import kafka.consumer.ConsumerIterator;
-import kafka.consumer.KafkaStream;
-import kafka.javaapi.consumer.ConsumerConnector;
-import kafka.message.MessageAndMetadata;
-
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.protocol.TCompactProtocol;
 
@@ -74,7 +70,7 @@ public class StandaloneKafkaConsumer {
   private static final String STANDALONE_KAFKA_METADATA_NTHREADS = "standalone.kafka.metadata.nthreads";
 
   private static interface ConsumerFactory {
-    public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaStream<byte[], byte[]> stream);
+    public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaConsumer<byte[], byte[]> consumer);
   }
   
   private static final class DataConsumer implements Runnable {
@@ -83,14 +79,14 @@ public class StandaloneKafkaConsumer {
     private final StoreClient store;
     private final StandaloneDirectoryClient directory;
     private final KafkaConsumerWrapper wrapper;
-    private final KafkaStream<byte[],byte[]> stream;
-        
-    public DataConsumer(KeyStore keystore, StoreClient store, StandaloneDirectoryClient directoryClient, KafkaConsumerWrapper wrapper, KafkaStream<byte[], byte[]> stream) {
+    private final KafkaConsumer<byte[],byte[]> consumer;
+
+    public DataConsumer(KeyStore keystore, StoreClient store, StandaloneDirectoryClient directoryClient, KafkaConsumerWrapper wrapper, KafkaConsumer<byte[], byte[]> consumer) {
       this.keystore = keystore;
       this.store = store;
       this.directory = directoryClient;
       this.wrapper = wrapper;
-      this.stream = stream;
+      this.consumer = consumer;
     }
     
     @Override
@@ -101,9 +97,7 @@ public class StandaloneKafkaConsumer {
       long count = 0L;
       
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
-        
         byte[] siphashKey = keystore.decodeKey(wrapper.mac);
         byte[] aesKey = keystore.decodeKey(wrapper.aes);
         
@@ -111,21 +105,12 @@ public class StandaloneKafkaConsumer {
 
         // TODO(hbs): allow setting of writeBufferSize
 
-        while (iter.hasNext()) {
-          //
-          // Since the cal to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
+        while (true) {
+          ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
+          for (ConsumerRecord<byte[], byte[]> record : records) {
             count++;
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            
-            byte[] data = msg.message();
+
+            byte[] data = record.value();
 
             // TODO(hbs): Sensision.update(SensisionConstants.SENSISION_CLASS_STANDALONE_KAFKA__DATA_COUNT, Sensision.EMPTY_LABELS, 1);
             // TODO(hbs): Sensision.update(SensisionConstants.SENSISION_CLASS_STANDALONE_KAFKA_DATA_BYTES, Sensision.EMPTY_LABELS, data.length);
@@ -168,13 +153,7 @@ public class StandaloneKafkaConsumer {
               case DELETE:
                 break;
             }          
-          } else {
-            // Sleep a tiny while
-            try {
-              Thread.sleep(2L);
-            } catch (InterruptedException ie) {             
-            }
-          }          
+          }
         }        
       } catch (Throwable t) {
         // FIXME(hbs): log something/update Sensision metrics
@@ -242,14 +221,14 @@ public class StandaloneKafkaConsumer {
     private final StoreClient storeClient;
     private final StandaloneDirectoryClient directoryClient;
     private final KafkaConsumerWrapper wrapper;
-    private final KafkaStream<byte[],byte[]> stream;
-        
-    public MetadataConsumer(final KeyStore keystore, final StoreClient storeClient, final StandaloneDirectoryClient directoryClient, KafkaConsumerWrapper wrapper, KafkaStream<byte[], byte[]> stream) {      
+    private final KafkaConsumer<byte[],byte[]> consumer;
+
+    public MetadataConsumer(final KeyStore keystore, final StoreClient storeClient, final StandaloneDirectoryClient directoryClient, KafkaConsumerWrapper wrapper, KafkaConsumer<byte[], byte[]> consumer) {
       this.keystore = keystore;
       this.storeClient = storeClient;
       this.directoryClient = directoryClient;
       this.wrapper = wrapper;
-      this.stream = stream;
+      this.consumer = consumer;
     }
     
     @Override
@@ -257,29 +236,19 @@ public class StandaloneKafkaConsumer {
       long count = 0L;
       
       try {
-        ConsumerIterator<byte[],byte[]> iter = this.stream.iterator();
 
         byte[] siphashKey = keystore.decodeKey(wrapper.mac);
         byte[] aesKey = keystore.decodeKey(wrapper.aes);
             
         
         // TODO(hbs): allow setting of writeBufferSize
+        while (true) {
+          ConsumerRecords<byte[], byte[]> records = consumer.poll(500L);
 
-        while (iter.hasNext()) {
-          //
-          // Since the cal to 'next' may block, we need to first
-          // check that there is a message available, otherwise we
-          // will miss the synchronization point with the other
-          // threads.
-          //
-          
-          boolean nonEmpty = iter.nonEmpty();
-          
-          if (nonEmpty) {
+          for (ConsumerRecord<byte[], byte[]> record : records) {
             count++;
-            MessageAndMetadata<byte[], byte[]> msg = iter.next();
-            
-            byte[] data = msg.message();
+
+            byte[] data = record.value();
             
             if (null != siphashKey) {
               data = CryptoUtils.removeMAC(siphashKey, data);
@@ -338,14 +307,8 @@ public class StandaloneKafkaConsumer {
             }                        
 
             directoryClient.register(metadata);
-          } else {
-            // Sleep a tiny while
-            try {
-              Thread.sleep(2L);
-            } catch (InterruptedException ie) {             
-            }
-          }          
-        }        
+          }
+        }
       } catch (Throwable t) {
         t.printStackTrace(System.err);
       } finally {
@@ -391,8 +354,7 @@ public class StandaloneKafkaConsumer {
     public void run() {
       
       ExecutorService executor = null;
-      ConsumerConnector connector = null;
-      
+
       while(true) {
         try {
           //
@@ -409,27 +371,24 @@ public class StandaloneKafkaConsumer {
           Properties props = new Properties();
           props.setProperty("zookeeper.connect", zkconnect);
           props.setProperty("group.id", groupid);
-          props.setProperty("auto.commit.enable", "false");    
-          
-          ConsumerConfig config = new ConsumerConfig(props);
-          connector = Consumer.createJavaConsumerConnector(config);
-          
-          Map<String,List<KafkaStream<byte[], byte[]>>> consumerMap = connector.createMessageStreams(topicCountMap);
-          
-          List<KafkaStream<byte[], byte[]>> streams = consumerMap.get(topic);
+          props.setProperty("auto.commit.enable", "false");
+          props.put("key.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
+          props.put("value.deserializer","org.apache.kafka.common.serialization.ByteArrayDeserializer");
           
           executor = Executors.newFixedThreadPool(nthreads);
           
           //
           // now create runnables which will consume messages
           //
-          
-          for (final KafkaStream<byte[],byte[]> stream : streams) {
-            executor.submit(factory.getConsumer(this, stream));
+          for (int i = 0; i< nthreads; i++) {
+
+            KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props);
+            consumer.subscribe(Collections.singletonList(topic));
+            executor.submit(factory.getConsumer(this, consumer));
           }      
 
           long lastCommit = System.currentTimeMillis();
-          
+
           while(!abort.get() && !Thread.currentThread().isInterrupted()) {
             long sleepUntil = lastCommit + commitPeriod;
             long delta = sleepUntil - System.currentTimeMillis();
@@ -439,8 +398,6 @@ public class StandaloneKafkaConsumer {
             }
 
             try {
-              // Commit offsets
-              connector.commitOffsets();
               lastCommit = System.currentTimeMillis();
               //Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STANDALONE_KAFKA_DATA_COMMITS, Sensision.EMPTY_LABELS, 1);              
             } catch (Throwable t) {
@@ -461,14 +418,6 @@ public class StandaloneKafkaConsumer {
             } catch (Exception e) {                
             }
           }
-          if (null != connector) {
-            try {
-              connector.shutdown();
-            } catch (Exception e) {
-              
-            }
-          }
-          
           //Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STANDALONE_ABORTS, Sensision.EMPTY_LABELS, 1);
           
           abort.set(false);
@@ -496,8 +445,8 @@ public class StandaloneKafkaConsumer {
         Integer.valueOf(properties.getProperty(STANDALONE_KAFKA_METADATA_NTHREADS)),
         new ConsumerFactory() {          
           @Override
-          public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaStream<byte[], byte[]> stream) {
-            return new MetadataConsumer(keystore, storeClient, directoryClient, wrapper, stream);
+          public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaConsumer<byte[], byte[]> consumer) {
+            return new MetadataConsumer(keystore, storeClient, directoryClient, wrapper, consumer);
           }
         });
     metadataWrapper.setName("[Standalone Kafka Metadata Consumer Wrapper]");
@@ -516,8 +465,8 @@ public class StandaloneKafkaConsumer {
         Integer.valueOf(properties.getProperty(STANDALONE_KAFKA_DATA_NTHREADS)),
         new ConsumerFactory() {          
           @Override
-          public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaStream<byte[], byte[]> stream) {
-            return new DataConsumer(keystore, storeClient, directoryClient, wrapper, stream);
+          public Runnable getConsumer(KafkaConsumerWrapper wrapper, KafkaConsumer<byte[], byte[]> consumer) {
+            return new DataConsumer(keystore, storeClient, directoryClient, wrapper, consumer);
           }
         });
     dataWrapper.setName("[Standalone Kafka Data Consumer Wrapper]");

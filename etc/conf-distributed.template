@@ -7,7 +7,7 @@
 //
 // FYI you can reference attributes to avoid duplication and make configuration easy to update
 //
-// kafka.data.topic = data
+// kafka.data.topic = /apps/warp:data
 // ingress.kafka.data.topic = ${kafka.data.topic}
 //
 
@@ -380,7 +380,7 @@ webcall.kafka.brokerlist = 127.0.0.1:9092
 //
 // Topic to use for WebCall requests
 //
-webcall.kafka.topic = webcall
+webcall.kafka.topic = /apps/warp:webcall
 
 //
 // AES key to use for encrypting WebCall requests
@@ -473,7 +473,7 @@ directory.kafka.metadata.zkconnect = 127.0.0.1:5181
 //
 // Actual 'metadata' topic
 //
-directory.kafka.metadata.topic = metadata
+directory.kafka.metadata.topic = /apps/warp:metadata
 
 //
 // Key to use for computing MACs (128 bits in hex or OSS reference)
@@ -769,7 +769,7 @@ ingress.kafka.metadata.brokerlist = 127.0.0.1:9092
 //
 // Actual 'meta' topic
 //
-ingress.kafka.metadata.topic =  metadata
+ingress.kafka.metadata.topic =  /apps/warp:metadata
 
 //
 // Key to use for computing MACs (128 bits in hex or OSS reference)
@@ -791,7 +791,7 @@ ingress.kafka.metadata.groupid = ingress.metadata-localhost
 // Offset reset strategy when consuming the metadata topic
 // 'smallest' should be left as the default.
 //
-ingress.kafka.metadata.consumer.auto.offset.reset = smallest
+ingress.kafka.metadata.consumer.auto.offset.reset = earliest 
 
 //
 // How often to commit the offsets for topic 'metadata' (in ms)
@@ -811,7 +811,7 @@ ingress.kafka.data.brokerlist = 127.0.0.1:9092
 //
 // Actual 'data' topic
 //
-ingress.kafka.data.topic = data
+ingress.kafka.data.topic = /apps/warp:data
 
 //
 // Size of Kafka Producer pool for the 'data' topic
@@ -970,7 +970,7 @@ store.kafka.data.brokerlist = 127.0.0.1:9092
 //
 // Actual 'data' topic
 //
-store.kafka.data.topic = data
+store.kafka.data.topic = /apps/warp:data
 
 //
 // Key to use for computing MACs (128 bits in hex or OSS reference)
@@ -1126,7 +1126,7 @@ plasma.frontend.kafka.zkconnect = 127.0.0.1:5181
 // Kafka topic to consume. This topic is dedicated to this Plasma frontend.
 // One topic per instance of plasma frontend.
 //
-plasma.frontend.kafka.topic = plasmafe1
+plasma.frontend.kafka.topic = /apps/warp:plasmafe1
 
 //
 // Kafka groupid under which to consume above topic
@@ -1208,7 +1208,7 @@ plasma.backend.kafka.in.zkconnect = 127.0.0.1:5181
 //
 // Actual 'in' topic
 //
-plasma.backend.kafka.in.topic = data
+plasma.backend.kafka.in.topic = /apps/warp:data
 
 //
 // Key to use for computing MACs (128 bits in hex or OSS reference)
@@ -1367,7 +1367,7 @@ runner.kafka.poolsize = 2
 //
 // Topic to use to submit the scripts
 //
-runner.kafka.topic = runner
+runner.kafka.topic = /apps/warp:runner
 
 //
 // Groupid to use when consuming scripts
@@ -1681,7 +1681,7 @@ geodir.kafka.data.brokerlist = 127.0.0.1:9092
 //
 // Name of the data topic
 //
-geodir.kafka.data.topic = data
+geodir.kafka.data.topic = /apps/warp:data
 
 //
 // Group ID for consuming the data topic.
