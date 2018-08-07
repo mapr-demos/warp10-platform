@@ -23,11 +23,21 @@ Build Warp10 according to [building](/BUILDING.md) document. Note that you can b
 Bintray credentials. In such case Gradle build will result in `warp10/archive/` directory, although the build will be 
 marked as failed.
 
+Or execute the following commands to create warp10 archive without Bintray publication:
+```
+./gradlew warp10:generateThrift
+./gradlew token:generateThrift
+./gradlew crypto:clean crypto:install   
+./gradlew token:clean token:install
+./gradlew warp10:clean warp10:createTarArchive
+```
+
+
 ## Install
 
 Copy contents of `warp10/archive/` directory into one of the MapR Cluster nodes:
 ```
-$ scp -r warp10/archive/warp10-1.2.18-1-g0649eb8/ mapr@yournode:/home/mapr
+$ scp -r warp10/archive/warp10-1.2.18-*/ mapr@yournode:/home/mapr
 ```
 
 ## Configure
@@ -68,8 +78,8 @@ and `WRITE` and `READ` tokens.
 You can generate your own write and read tokens using `worf` tool:
 
 ```
-[mapr@yournode ~]$ cd warp10-1.2.18-1-g0649eb8/
-[mapr@yournode ~]$ java -cp bin/warp10-1.2.18-1-g0649eb8.jar io.warp10.worf.Worf  -i templates/conf-distributed.template
+[mapr@yournode ~]$ cd warp10-1.2.18-*
+[mapr@yournode ~]$ java -cp bin/warp10-1.2.18-*.jar io.warp10.worf.Worf  -i templates/conf-distributed.template
 
 # GENERATE 'READ' TOKEN:
 warp10>encodeToken
@@ -96,10 +106,9 @@ ttl=9999999999
 warp10>encodeToken
 encodeToken/token type (read|write)>write
 encodeToken/application name>test
-encodeToken/data producer UUID (you can create a new one by typing 'uuidgen') >uuidgen
+encodeToken/data producer UUID (you can create a new one by typing 'uuidgen') >4ee54ebb-80f9-4532-8cc0-8452211c40c9
 uuid generated=7f71642c-4fb1-44e5-bfa4-a595c19e4cec
-encodeToken/data owner UUID (you can create a new one by typing 'uuidgen') >uuidgen
-uuid generated=c7da21ef-277a-4e62-bf96-09e27153cf67
+encodeToken/data owner UUID (you can create a new one by typing 'uuidgen') >4ee54ebb-80f9-4532-8cc0-8452211c40c9
 encodeToken/token time to live (TTL) in ms >9999999999
 encodeToken/OPTIONAL fixed labels (key1=value1,key2=value2) >
 encodeToken(generate | cancel)>generate
@@ -118,8 +127,8 @@ ttl=9999999999
 By default `` configuration file enables `ingress,directory,store,egress` required components. Now, you can run Warp10 
 using the following command:
 ```
-[mapr@yournode ~]$ cd warp10-1.2.18-1-g0649eb8/
-[mapr@yournode ~]$ java -Djava.security.auth.login.config=/opt/mapr/conf/mapr.login.conf -Dzookeeper.sasl.clientconfig=Client_simple -Dzookeeper.saslprovider=com.mapr.security.simplesasl.SimpleSaslProvider -Dlog4j.configuration=file:./etc/log4j.xml -cp bin/warp10-1.2.18-1-g0649eb8.jar io.warp10.WarpDist ./templates/conf-distributed.template
+[mapr@yournode ~]$ cd warp10-1.2.18-*/
+[mapr@yournode ~]$ java -Djava.security.auth.login.config=/opt/mapr/conf/mapr.login.conf -Dzookeeper.sasl.clientconfig=Client_simple -Dzookeeper.saslprovider=com.mapr.security.simplesasl.SimpleSaslProvider -Dlog4j.configuration=file:./etc/log4j.xml -cp bin/warp10-1.2.18-*.jar io.warp10.WarpDist ./templates/conf-distributed.template
 ```
 
 ### Verification

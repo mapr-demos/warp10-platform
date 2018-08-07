@@ -41,7 +41,7 @@ max.encoder.size = 100000
 // Comma separated list of components to run in distributed mode
 // Valid values are 'ingress', 'directory', 'store', 'egress', 'fetch', 'plasmaFE', 'plasmaBE', 'runner', 'geodir'
 //
-warp.components = ingress,directory,store,egress
+warp.components = ingress,directory,store,egress,plasmaFE,plasmaBE,runner
 
 //
 // 128 bits key for verifying class names, format is hex:hhhhh...hhhh
@@ -882,7 +882,7 @@ ingress.kafka.metadata.maxsize = 900000
 // Auto offset strategy to use when consuming the throttling topic. Set to 'largest' unless you want to do
 // a special experiment.
 //
-#ingress.kafka.throttling.consumer.auto.offset.reset = largest
+#ingress.kafka.throttling.consumer.auto.offset.reset = latest
 
 //
 // Kafka client id to use for the metadata producer
@@ -1321,7 +1321,7 @@ runner.roles = standalone
 // and reside in subdirectories of this root directory whose name is the periodicity (in ms) at
 // which to run them.
 //
-#runner.root =
+runner.root = /home/mapr
 
 //
 // Number of threads to use for running scripts.

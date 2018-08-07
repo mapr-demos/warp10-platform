@@ -671,7 +671,7 @@ public class ThrottlingManager {
           properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_CONSUMER_CLIENTID),
           properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_GROUPID),
           null,
-          properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_CONSUMER_AUTO_OFFSET_RESET, "largest"),
+          properties.getProperty(Configuration.INGRESS_KAFKA_THROTTLING_CONSUMER_AUTO_OFFSET_RESET, "latest"),
           1,
           commitOffset,
           estimatorConsumerFactory);      

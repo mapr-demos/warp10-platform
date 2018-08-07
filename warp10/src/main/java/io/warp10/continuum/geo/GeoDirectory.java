@@ -1387,7 +1387,7 @@ public class GeoDirectory extends AbstractHandler implements Runnable, GeoDirect
       
       long sip = SipHashInline.hash24(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits(), data, 0, data.length);
       
-      String path = this.plasmaZnodeRoot + "/0." + uuid.toString() + "." + this.plasmaTopic + "." + idx + "." + Long.toHexString(sip);
+      String path = this.plasmaZnodeRoot + "/0." + uuid.toString() + "." + this.plasmaTopic.replaceAll("/", "-") + "." + idx + "." + Long.toHexString(sip);
       
       try {
         this.subsCurator.create().withMode(CreateMode.EPHEMERAL).forPath(path, data);

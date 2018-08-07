@@ -385,7 +385,7 @@ public class PlasmaFrontEnd extends StandalonePlasmaHandler implements Runnable,
                 
         long sip = SipHashInline.hash24(uuid.getMostSignificantBits(), uuid.getLeastSignificantBits(), data, 0, data.length);
         
-        String path = this.znoderoot + "/0." + uuid.toString() + "." + this.topic + "." + idx + "." + Long.toHexString(sip);
+        String path = this.znoderoot + "/0." + uuid.toString() + "." + this.topic.replaceAll("/", "-") + "." + idx + "." + Long.toHexString(sip);
         
         try {
           this.subscriptionCuratorFramework.create().withMode(CreateMode.EPHEMERAL).forPath(path, data);

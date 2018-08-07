@@ -201,7 +201,7 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
             // Do not commit offsets in ZK
             props.setProperty("auto.commit.enable", "false");
             // Reset offset to largest
-            props.setProperty("auto.offset.reset", "largest");
+            props.setProperty("auto.offset.reset", "latest");
             if (null != clientid) {
               props.setProperty("client.id", clientid);
             }
@@ -702,7 +702,7 @@ public class PlasmaBackEnd extends Thread implements NodeCacheListener {
     if (msglist.size() > 0 && (null == msg || msgsize.get() + thismsg > KAFKA_OUT_MAXSIZE)) {
 
       for(KeyedMessage<byte[], byte[]> message: msglist) {
-        this.kafkaProducer.send(new ProducerRecord<>(message.topic(), message.key(), message.message()));
+        this.kafkaProducer.send(new ProducerRecord<>(message.topic().replaceAll("-", "/"), message.key(), message.message()));
       }
 
       Sensision.update(SensisionConstants.SENSISION_CLASS_PLASMA_BACKEND_KAFKA_OUT_SENT, Sensision.EMPTY_LABELS, 1);

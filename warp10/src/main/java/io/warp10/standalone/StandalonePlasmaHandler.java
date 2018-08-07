@@ -152,7 +152,8 @@ public class StandalonePlasmaHandler extends WebSocketHandler.Simple implements 
     private StandalonePlasmaHandler handler;
     
     @OnWebSocketConnect
-    public void onWebSocketConnect(Session session) {
+    public void onWebSocketConnect(Session session) throws Exception {
+      Thread.sleep(1_000L);
     }
     
     @OnWebSocketMessage
@@ -161,6 +162,8 @@ public class StandalonePlasmaHandler extends WebSocketHandler.Simple implements 
       //
       // Split message on whitespace boundary
       //
+
+      Thread.sleep(1_000L);
       
       String[] tokens = message.split("\\s+");
             
