@@ -365,7 +365,7 @@ webcall.user.agent = Warp10-WebCall
 // Typical value is .*,!^127.0.0.1$,!^localhost$,!^192.168.*,!^10.*,!^172.(16|17|18|19|20|21|22|23|24|25|26|27|28|29|39|31)\..*
 //
 //
-webcall.host.patterns = !.*
+webcall.host.patterns = .*
 
 //
 // ZK Quorum to use for reaching the Kafka cluster to consume WebCall requests
