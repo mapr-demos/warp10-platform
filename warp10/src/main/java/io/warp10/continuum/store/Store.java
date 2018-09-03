@@ -64,18 +64,12 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.client.coprocessor.Batch;
-import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.BulkDeleteRequest;
-import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.BulkDeleteRequest.Builder;
-import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.BulkDeleteRequest.DeleteType;
-import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.BulkDeleteResponse;
-import org.apache.hadoop.hbase.coprocessor.example.generated.BulkDeleteProtos.BulkDeleteService;
-import org.apache.hadoop.hbase.ipc.BlockingRpcCallback;
-import org.apache.hadoop.hbase.ipc.ServerRpcController;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -1318,11 +1312,7 @@ public class Store extends Thread {
       scan.setStartRow(startkey);
       scan.setStopRow(endkey);
       scan.setMaxVersions();
-      //
-      // Set 'raw' to true so we correctly delete the cells still in memstore.
-      //
-      scan.setRaw(true);
-      
+
       //
       // Do not pollute the block cache
       //
@@ -1344,36 +1334,6 @@ public class Store extends Thread {
       //
       
       final AtomicBoolean error = new AtomicBoolean(false);
-      
-      final Batch.Call<BulkDeleteService, BulkDeleteResponse> callable = new Batch.Call<BulkDeleteService, BulkDeleteResponse>() {  
-        public BulkDeleteResponse call(BulkDeleteService service) throws IOException {
-          BlockingRpcCallback<BulkDeleteResponse> rpcCallback = new BlockingRpcCallback<BulkDeleteResponse>();
-          ServerRpcController controller = new ServerRpcController();
-
-          Builder builder = BulkDeleteRequest.newBuilder();
-          builder.setScan(ProtobufUtil.toScan(scan));
-
-          builder.setDeleteType(DeleteType.VERSION);
-                    
-          // Arbitrary for now, maybe come up with a better heuristic
-          builder.setRowBatchSize(1000);
-          service.delete(controller, builder.build(), rpcCallback);
-
-          BulkDeleteResponse resp = rpcCallback.get();
-          
-          //
-          // Check if controller trapped an exception or an error message (may happen if a region is too busy)
-          //
-
-          if (controller.failed()) {
-            error.set(true);
-          }
-
-          controller.checkFailed();
-                
-          return resp;
-        }
-      };
 
       Callable<Object> deleteCallable = new Callable<Object>() {
         @Override
@@ -1383,7 +1343,15 @@ public class Store extends Thread {
           long nano = System.nanoTime();
           
           try {
-            Map<byte[], BulkDeleteResponse> result = table.coprocessorService(BulkDeleteService.class, scan.getStartRow(), scan.getStopRow(), callable);
+
+            // Avoid using coprocessors since they are not supported by MapR-DB Binary
+            ResultScanner scanner = table.getScanner(scan);
+            List<Delete> dels = new ArrayList<>();
+            for (Result r : scanner) {
+                Delete d = new Delete(r.getRow());
+                dels.add(d);
+            }
+            table.delete(dels);
 
             nano = System.nanoTime() - nano;
 
@@ -1393,14 +1361,8 @@ public class Store extends Thread {
             
             long noOfDeletedRows = 0L;
             long noOfDeletedVersions = 0L;
-            long noOfRegions = result.size();
+            long noOfRegions = 0L;
 
-            // One element per region
-            for (BulkDeleteResponse response : result.values()) {
-              noOfDeletedRows += response.getRowsDeleted();
-              noOfDeletedVersions += response.getVersionsDeleted();
-            }
-            
             //
             // Update Sensision metrics for deletion
             //
